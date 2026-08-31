@@ -1,0 +1,1028 @@
+generator client {
+  provider            = "prisma-client"
+  output              = "../src/generated/prisma"
+  importFileExtension = "ts"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum MemoryAssertionKind {
+  grounded
+  reference
+}
+
+enum ProposalStatus {
+  pending
+  rejected
+  applied
+  failed
+}
+
+enum InstalledViewStatus {
+  enabled
+  incompatible
+}
+
+enum ViewCommandInitiator {
+  human
+  ai
+  system
+}
+
+enum ViewReactionAttentionStatus {
+  not_required
+  queued
+  running
+  silent
+  inform
+  needs_confirmation
+  failed
+}
+
+enum ViewReactionKnowledgeStatus {
+  not_required
+  queued
+  running
+  completed
+  failed
+}
+
+enum MemoryChatAssertionReceiptStatus {
+  queued
+  running
+  published
+  skipped
+  failed
+}
+
+enum ChatMessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+enum AuthUserRole {
+  ADMIN
+  MEMBER
+}
+
+enum AuthUserStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum MemoryAmbientHigherMemoryScope {
+  identity
+  narrative
+  working_set
+}
+
+enum MemoryActorHigherMemoryScope {
+  interaction
+  working_style
+  working_set
+}
+
+enum LibraryNodeKind {
+  file
+  folder
+}
+
+enum LibraryProcessingProfile {
+  catalog
+  coarse
+  deep
+}
+
+enum LibraryProcessingStatus {
+  idle
+  queued
+  running
+  ready
+  failed
+}
+
+enum LibraryPlanStatus {
+  pending
+  rejected
+  applied
+  failed
+}
+
+enum LibraryCompilationJobStatus {
+  queued
+  running
+  paused
+  completed
+  failed
+}
+
+enum LibraryProcessingStage {
+  queued
+  preparing
+  parsing
+  analyzing
+  resolving
+  staging
+  ready
+  failed
+}
+
+/// 一次本地目录或后续上传批次。第一版只记录导入结果，不承担文件同步。
+model LibraryImportBatch {
+  id              String    @id @default(uuid()) @db.Uuid
+  displayName     String    @map("display_name") @db.Text
+  originalRoot    String?   @map("original_root") @db.Text
+  status          String    @default("running") @db.Text
+  fileCount       Int       @default(0) @map("file_count")
+  uniqueBlobCount Int       @default(0) @map("unique_blob_count")
+  errorMessage    String?   @map("error_message") @db.Text
+  importedAt      DateTime  @default(now()) @map("imported_at") @db.Timestamptz(3)
+  completedAt     DateTime? @map("completed_at") @db.Timestamptz(3)
+
+  nodes LibraryNode[]
+
+  @@map("library_import_batches")
+}
+
+/// 按 SHA-256 保存的不可变原件；多个目录位置可以共享同一个 Blob。
+model LibrarySourceBlob {
+  id         String   @id @default(uuid()) @db.Uuid
+  sha256     String   @unique @db.Text
+  storageKey String   @map("storage_key") @db.Text
+  mimeType   String   @map("mime_type") @db.Text
+  byteSize   BigInt   @map("byte_size")
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  nodes              LibraryNode[]
+  processingRuns     LibrarySourceProcessingRun[]
+  catalogAssessments LibraryCatalogAssessment[]
+  sourceDocuments    LibrarySourceDocument[]
+
+  @@map("library_source_blobs")
+}
+
+/// Sydaris 资料库中的虚拟文件或文件夹。移动和重命名只改变树位置，不改变 Blob 或来源身份。
+model LibraryNode {
+  id                   String                   @id @default(uuid()) @db.Uuid
+  kind                 LibraryNodeKind
+  parentId             String?                  @map("parent_id") @db.Uuid
+  name                 String                   @db.Text
+  normalizedName       String                   @map("normalized_name") @db.Text
+  blobId               String?                  @map("blob_id") @db.Uuid
+  importBatchId        String?                  @map("import_batch_id") @db.Uuid
+  originalRelativePath String?                  @map("original_relative_path") @db.Text
+  processingProfile    LibraryProcessingProfile @default(catalog) @map("processing_profile")
+  processingStatus     LibraryProcessingStatus  @default(idle) @map("processing_status")
+  createdAt            DateTime                 @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime                 @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  parent             LibraryNode?                 @relation("LibraryTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children           LibraryNode[]                @relation("LibraryTree")
+  blob               LibrarySourceBlob?           @relation(fields: [blobId], references: [id], onDelete: Restrict)
+  importBatch        LibraryImportBatch?          @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
+  processingRuns     LibrarySourceProcessingRun[]
+  catalogAssessments LibraryCatalogAssessment[]
+
+  @@unique([parentId, normalizedName])
+  @@index([parentId, kind, name])
+  @@index([blobId])
+  @@index([processingProfile, processingStatus])
+  @@map("library_nodes")
+}
+
+/// 一次可恢复的基础编译任务。任务对唯一 Blob 去重，固定按 deep→coarse→catalog 执行。
+model LibraryCompilationJob {
+  id                  String                      @id @default(uuid()) @db.Uuid
+  status              LibraryCompilationJobStatus @default(queued)
+  activePhase         LibraryProcessingProfile?   @map("active_phase")
+  pauseRequested      Boolean                     @default(false) @map("pause_requested")
+  totalContent        Int                         @default(0) @map("total_content")
+  completedContent    Int                         @default(0) @map("completed_content")
+  failedContent       Int                         @default(0) @map("failed_content")
+  deepTotal           Int                         @default(0) @map("deep_total")
+  deepCompleted       Int                         @default(0) @map("deep_completed")
+  coarseTotal         Int                         @default(0) @map("coarse_total")
+  coarseCompleted     Int                         @default(0) @map("coarse_completed")
+  catalogTotal        Int                         @default(0) @map("catalog_total")
+  catalogCompleted    Int                         @default(0) @map("catalog_completed")
+  configuration       Json                        @default("{}") @db.JsonB
+  activeStage         String?                     @map("active_stage") @db.Text
+  globalStatus        String                      @default("queued") @map("global_status") @db.Text
+  globalProgress      Int                         @default(0) @map("global_progress")
+  globalTotal         Int                         @default(0) @map("global_total")
+  globalRetryCount    Int                         @default(0) @map("global_retry_count")
+  globalStatusMessage String?                     @map("global_status_message") @db.Text
+  globalErrorMessage  String?                     @map("global_error_message") @db.Text
+  globalCheckpoint    Json                        @default("{}") @map("global_checkpoint") @db.JsonB
+  globalResult        Json                        @default("{}") @map("global_result") @db.JsonB
+  errorMessage        String?                     @map("error_message") @db.Text
+  createdAt           DateTime                    @default(now()) @map("created_at") @db.Timestamptz(3)
+  startedAt           DateTime?                   @map("started_at") @db.Timestamptz(3)
+  heartbeatAt         DateTime?                   @map("heartbeat_at") @db.Timestamptz(3)
+  completedAt         DateTime?                   @map("completed_at") @db.Timestamptz(3)
+
+  runs LibrarySourceProcessingRun[]
+
+  @@index([status, createdAt])
+  @@map("library_compilation_jobs")
+}
+
+/// 资料库当前生效的跨文件 Object 草稿快照。重编译只在成功后原子替换它。
+model LibraryCompilationState {
+  id            String   @id @default("default") @db.Text
+  globalObjects Json     @default("[]") @map("global_objects") @db.JsonB
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("library_compilation_state")
+}
+
+/// 解析或编译的一次运行记录。成功运行会在 Global Object 归并后发布到 Shared Brain。
+model LibrarySourceProcessingRun {
+  id                      String                   @id @default(uuid()) @db.Uuid
+  libraryNodeId           String                   @map("library_node_id") @db.Uuid
+  sourceBlobId            String?                  @map("source_blob_id") @db.Uuid
+  jobId                   String?                  @map("job_id") @db.Uuid
+  profile                 LibraryProcessingProfile
+  profileVersion          String                   @map("profile_version") @db.Text
+  status                  LibraryProcessingStatus  @default(queued)
+  stage                   LibraryProcessingStage   @default(queued)
+  phaseOrder              Int                      @default(0) @map("phase_order")
+  progressCurrent         Int                      @default(0) @map("progress_current")
+  progressTotal           Int                      @default(1) @map("progress_total")
+  statusMessage           String?                  @map("status_message") @db.Text
+  retryCount              Int                      @default(0) @map("retry_count")
+  isCurrent               Boolean                  @default(false) @map("is_current")
+  checkpoint              Json                     @default("{}") @db.JsonB
+  parserKey               String?                  @map("parser_key") @db.Text
+  artifactLocation        String?                  @map("artifact_location") @db.Text
+  resultSummary           String?                  @map("result_summary") @db.Text
+  errorMessage            String?                  @map("error_message") @db.Text
+  publishedAt             DateTime?                @map("published_at") @db.Timestamptz(3)
+  publishedAssertionCount Int                      @default(0) @map("published_assertion_count")
+  publishedObjectCount    Int                      @default(0) @map("published_object_count")
+  createdAt               DateTime                 @default(now()) @map("created_at") @db.Timestamptz(3)
+  completedAt             DateTime?                @map("completed_at") @db.Timestamptz(3)
+
+  libraryNode LibraryNode               @relation(fields: [libraryNodeId], references: [id], onDelete: Cascade)
+  sourceBlob  LibrarySourceBlob?        @relation(fields: [sourceBlobId], references: [id], onDelete: Restrict)
+  job         LibraryCompilationJob?    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  document    LibrarySourceDocument?
+  assessment  LibraryCatalogAssessment?
+
+  @@unique([jobId, sourceBlobId])
+  @@index([libraryNodeId, createdAt])
+  @@index([status, createdAt])
+  @@index([jobId, phaseOrder, status])
+  @@index([sourceBlobId, isCurrent])
+  @@map("library_source_processing_runs")
+}
+
+/// 轻量编目或粗编译的带来源候选；Global Object 归并成功后会发布为 Shared Brain Assertion。
+model LibraryCatalogAssessment {
+  id                   String   @id @default(uuid()) @db.Uuid
+  processingRunId      String   @unique @map("processing_run_id") @db.Uuid
+  sourceBlobId         String   @map("source_blob_id") @db.Uuid
+  representativeNodeId String   @map("representative_node_id") @db.Uuid
+  summary              String   @db.Text
+  previewExcerpt       String?  @map("preview_excerpt") @db.Text
+  referenceCandidates  Json     @default("[]") @map("reference_candidates") @db.JsonB
+  assertionCandidates  Json     @default("[]") @map("assertion_candidates") @db.JsonB
+  objectCandidates     Json     @default("[]") @map("object_candidates") @db.JsonB
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  processingRun      LibrarySourceProcessingRun @relation(fields: [processingRunId], references: [id], onDelete: Cascade)
+  sourceBlob         LibrarySourceBlob          @relation(fields: [sourceBlobId], references: [id], onDelete: Restrict)
+  representativeNode LibraryNode                @relation(fields: [representativeNodeId], references: [id], onDelete: Cascade)
+
+  @@index([sourceBlobId])
+  @@map("library_catalog_assessments")
+}
+
+/// 一次已发布的来源文档版本；认知层的 SourceRegion 与 SourceBlock 以它为稳定回读锚点。
+model LibrarySourceDocument {
+  id              String   @id @default(uuid()) @db.Uuid
+  processingRunId String?  @unique @map("processing_run_id") @db.Uuid
+  sourceBlobId    String   @map("source_blob_id") @db.Uuid
+  title           String   @db.Text
+  parser          String   @db.Text
+  blockCount      Int      @default(0) @map("block_count")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  processingRun LibrarySourceProcessingRun? @relation(fields: [processingRunId], references: [id], onDelete: SetNull)
+  sourceBlob    LibrarySourceBlob           @relation(fields: [sourceBlobId], references: [id], onDelete: Restrict)
+  sourceRegions MemorySourceRegion[]
+  sourceBlocks  MemorySourceBlock[]
+
+  @@index([sourceBlobId])
+  @@map("library_source_documents")
+}
+
+/// AI 对资料库移动与处理档位的轻量建议；批准前不改变文件树。
+model LibraryPlan {
+  id            String            @id @default(uuid()) @db.Uuid
+  status        LibraryPlanStatus @default(pending)
+  reason        String            @db.Text
+  operations    Json              @db.JsonB
+  createdAt     DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  decidedAt     DateTime?         @map("decided_at") @db.Timestamptz(3)
+  appliedAt     DateTime?         @map("applied_at") @db.Timestamptz(3)
+  failureReason String?           @map("failure_reason") @db.Text
+
+  @@index([status, createdAt])
+  @@map("library_plans")
+}
+
+/// 区域树中实际拥有原文并经过 source semantics 编译的节点。
+model MemorySourceRegion {
+  id                  String   @id @default(uuid()) @db.Uuid
+  sourceDocumentId    String   @map("source_document_id") @db.Uuid
+  sourceNodeId        String   @map("source_node_id") @db.Text
+  schemaVersion       String   @map("schema_version") @db.Text
+  label               String   @db.Text
+  lineageNodeIds      String[] @map("lineage_node_ids")
+  sourcePages         Int[]    @map("source_pages")
+  sourceBlockIds      String[] @map("source_block_ids")
+  coveredBlockIds     String[] @map("covered_block_ids")
+  unclaimedBlockIds   String[] @map("unclaimed_block_ids")
+  initialClaimCount   Int      @map("initial_claim_count")
+  reviewAdditionCount Int      @map("review_addition_count")
+  modelCalls          Int      @map("model_calls")
+  createdAt           DateTime @map("created_at")
+
+  sourceDocument  LibrarySourceDocument        @relation(fields: [sourceDocumentId], references: [id], onDelete: Cascade)
+  objectFragments MemorySourceObjectFragment[]
+  assertions      MemoryAssertion[]
+
+  @@unique([sourceDocumentId, sourceNodeId])
+  @@index([sourceDocumentId])
+  @@index([label])
+  @@map("memory_source_regions")
+}
+
+/// PDF 解析后的稳定原文块，是 Assertion 的来源依据和回看锚点。
+model MemorySourceBlock {
+  id               String   @id @default(uuid()) @db.Uuid
+  sourceDocumentId String   @map("source_document_id") @db.Uuid
+  sourceBlockId    String   @map("source_block_id") @db.Text
+  order            Int
+  blockType        String   @map("block_type") @db.Text
+  sourcePages      Int[]    @map("source_pages")
+  headingLevel     Int?     @map("heading_level")
+  headingPath      String[] @map("heading_path")
+  sourceType       String?  @map("source_type") @db.Text
+  sourceSubType    String?  @map("source_sub_type") @db.Text
+  bbox             Json?    @db.JsonB
+  assetPath        String?  @map("asset_path") @db.Text
+  markdown         String   @db.Text
+
+  sourceDocument LibrarySourceDocument        @relation(fields: [sourceDocumentId], references: [id], onDelete: Cascade)
+  assertionUses  MemoryAssertionSourceBlock[]
+
+  @@unique([sourceDocumentId, sourceBlockId])
+  @@unique([sourceDocumentId, order])
+  @@index([sourceDocumentId])
+  @@map("memory_source_blocks")
+}
+
+/// Leaf compiler 产生的 source-local ObjectFragment；不是长期 Object，也不直接供 Search 使用。
+model MemorySourceObjectFragment {
+  id               String   @id @default(uuid()) @db.Uuid
+  sourceRegionId   String   @map("source_region_id") @db.Uuid
+  sourceFragmentId String   @map("source_fragment_id") @db.Text
+  surfaceForms     String[] @map("surface_forms")
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  sourceRegion        MemorySourceRegion                    @relation(fields: [sourceRegionId], references: [id], onDelete: Cascade)
+  assertionReferences MemoryAssertionFragmentReference[]
+  surfaceMemberships  MemoryGlobalObjectSurfaceMembership[]
+
+  @@unique([sourceRegionId, sourceFragmentId])
+  @@map("memory_source_object_fragments")
+}
+
+/// 来源中的内聚知识单元，或指向明确来源区域的导航索引。
+model MemoryAssertion {
+  id                              String              @id @default(uuid()) @db.Uuid
+  sourceRegionId                  String?             @map("source_region_id") @db.Uuid
+  chatCaptureId                   String?             @map("chat_capture_id") @db.Uuid
+  sourceClaimId                   String              @map("source_claim_id") @db.Text
+  kind                            MemoryAssertionKind @default(grounded)
+  statementTemplateMarkdown       String              @map("statement_template_markdown") @db.Text
+  globalStatementTemplateMarkdown String              @map("global_statement_template_markdown") @db.Text
+  contextDependent                Boolean             @map("context_dependent")
+  createdAt                       DateTime            @default(now()) @map("created_at")
+
+  sourceRegion       MemorySourceRegion?                @relation(fields: [sourceRegionId], references: [id], onDelete: Cascade)
+  chatCapture        MemoryChatAssertionCapture?        @relation(fields: [chatCaptureId], references: [id], onDelete: Cascade)
+  chatEvidenceLinks  MemoryAssertionChatEvidenceLink[]
+  fragmentReferences MemoryAssertionFragmentReference[]
+  objectLinks        MemoryAssertionObjectLink[]
+  objectCoverage     MemoryAssertionObjectCoverage[]
+  sourceBlockLinks   MemoryAssertionSourceBlock[]
+  embedding          MemoryAssertionEmbedding?
+
+  @@unique([sourceRegionId, sourceClaimId])
+  @@unique([chatCaptureId, sourceClaimId])
+  @@index([chatCaptureId])
+  @@map("memory_assertions")
+}
+
+/// 一次由主回答模型显式排队、并在回答后执行的 Assertion 提取事务。
+/// 完整主对话语义转录属于解释上下文，不是事实 Evidence。
+model MemoryChatAssertionCapture {
+  id                        String   @id @default(uuid()) @db.Uuid
+  queuedByActorId           String   @map("queued_by_actor_id") @db.Uuid
+  queuedByMessageId         String   @map("queued_by_message_id") @db.Text
+  queueReason               String   @map("queue_reason") @db.Text
+  submittedAt               DateTime @map("submitted_at") @db.Timestamptz(3)
+  timezone                  String   @db.Text
+  semanticContext           Json     @map("semantic_context") @db.JsonB
+  /// 与本次 Assertion 发布原子执行的确定性 Surface 纠错；这是 execution audit，不是 Proposal。
+  appliedSurfaceCorrections Json     @default("[]") @map("applied_surface_corrections") @db.JsonB
+  createdAt                 DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  queuedBy   MemoryActor       @relation(fields: [queuedByActorId], references: [id], onDelete: Restrict)
+  assertions MemoryAssertion[]
+
+  @@unique([queuedByActorId, queuedByMessageId])
+  @@map("memory_chat_assertion_captures")
+}
+
+/// Chat → Assertion 的操作回执；供后续主对话读取真实处理状态，不属于组织事实或 Evidence。
+/// Capture 只在成功发布时存在，而回执也会保留 queued/running/skipped/failed 结果。
+model MemoryChatAssertionReceipt {
+  id                    String                           @id @default(uuid()) @db.Uuid
+  actorId               String                           @map("actor_id") @db.Uuid
+  clientMessageId       String                           @map("client_message_id") @db.Text
+  execution             String                           @db.Text
+  queueReason           String                           @map("queue_reason") @db.Text
+  status                MemoryChatAssertionReceiptStatus @default(queued)
+  submittedAt           DateTime                         @map("submitted_at") @db.Timestamptz(3)
+  conversationId        String?                          @map("conversation_id") @db.Uuid
+  timezone              String?                          @db.Text
+  semanticContext       Json?                            @map("semantic_context") @db.JsonB
+  retrieval             Json?                            @db.JsonB
+  startedAt             DateTime?                        @map("started_at") @db.Timestamptz(3)
+  completedAt           DateTime?                        @map("completed_at") @db.Timestamptz(3)
+  publishedAssertions   Int                              @default(0) @map("published_assertions")
+  publishedAssertionIds String[]                         @default([]) @map("published_assertion_ids")
+  affectedObjectIds     String[]                         @default([]) @map("affected_object_ids")
+  affectedObjects       Json                             @default("[]") @map("affected_objects") @db.JsonB
+  outcomeSummary        String?                          @map("outcome_summary") @db.Text
+  errorMessage          String?                          @map("error_message") @db.Text
+  createdAt             DateTime                         @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime                         @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  actor        MemoryActor       @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  conversation ChatConversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+
+  @@unique([actorId, clientMessageId])
+  @@index([actorId, execution, status, startedAt], map: "chat_assertion_receipts_recovery_idx")
+  @@index([actorId, updatedAt])
+  @@index([conversationId, submittedAt])
+  @@map("memory_chat_assertion_receipts")
+}
+
+/// 被至少一条已发布 Assertion 使用的用户聊天 Evidence；Assistant 上下文只用于解释，不是事实依据。
+model MemoryChatEvidence {
+  id                 String   @id @default(uuid()) @db.Uuid
+  conversationId     String?  @map("conversation_id") @db.Uuid
+  clientMessageId    String   @map("client_message_id") @db.Text
+  submittedByActorId String   @map("submitted_by_actor_id") @db.Uuid
+  submittedAt        DateTime @map("submitted_at") @db.Timestamptz(3)
+  timezone           String   @db.Text
+  rawUserMessage     String   @map("raw_user_message") @db.Text
+  submittedAtBasis   String   @default("server_received") @map("submitted_at_basis") @db.Text
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  conversation   ChatConversation?                 @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  submittedBy    MemoryActor                       @relation(fields: [submittedByActorId], references: [id], onDelete: Restrict)
+  assertionLinks MemoryAssertionChatEvidenceLink[]
+  objectMentions MemoryChatObjectMention[]
+
+  @@unique([submittedByActorId, clientMessageId])
+  @@index([conversationId, submittedAt])
+  @@map("memory_chat_evidence")
+}
+
+/// 一条 Assertion 可以由多条用户消息共同支持；逐字引文记录在关联上。
+model MemoryAssertionChatEvidenceLink {
+  assertionId    String   @map("assertion_id") @db.Uuid
+  chatEvidenceId String   @map("chat_evidence_id") @db.Uuid
+  ordinal        Int
+  evidenceQuotes String[] @map("evidence_quotes")
+
+  assertion    MemoryAssertion    @relation(fields: [assertionId], references: [id], onDelete: Cascade)
+  chatEvidence MemoryChatEvidence @relation(fields: [chatEvidenceId], references: [id], onDelete: Restrict)
+
+  @@id([assertionId, chatEvidenceId])
+  @@unique([assertionId, ordinal])
+  @@index([chatEvidenceId])
+  @@map("memory_assertion_chat_evidence_links")
+}
+
+/// 第一版由服务端解析出的稳定 Actor identity；认证产品以后只需替换 Actor 获取方式。
+model MemoryActor {
+  id          String   @id @db.Uuid
+  displayName String   @map("display_name") @db.Text
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  chatEvidence          MemoryChatEvidence[]
+  chatAssertionCaptures MemoryChatAssertionCapture[]
+  chatAssertionReceipts MemoryChatAssertionReceipt[]
+  chatConversations     ChatConversation[]
+  higherMemories        MemoryActorHigherMemory[]
+  authUser              AuthUser?
+
+  @@map("memory_actors")
+}
+
+/// 只属于一个稳定 Actor 的跨会话高层协作认知。
+/// 与 Compilation 和 GlobalObject 解耦，不能作为共享组织事实或正式业务状态的证据。
+model MemoryActorHigherMemory {
+  id                String                       @id @default(uuid()) @db.Uuid
+  actorId           String                       @map("actor_id") @db.Uuid
+  scope             MemoryActorHigherMemoryScope
+  contentMarkdown   String                       @map("content_markdown") @db.Text
+  maintainedAt      DateTime                     @map("maintained_at") @db.Timestamptz(3)
+  triggerMessageId  String                       @map("trigger_message_id") @db.Text
+  maintenanceReason String                       @map("maintenance_reason") @db.Text
+  createdAt         DateTime                     @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime                     @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  actor MemoryActor @relation(fields: [actorId], references: [id], onDelete: Cascade)
+
+  @@unique([actorId, scope])
+  @@index([actorId, maintainedAt])
+  @@map("memory_actor_higher_memories")
+}
+
+/// Actor 的私有 AI 对话。共享组织认知通过 Assertion / Business View 汇合，不通过暴露完整对话汇合。
+model ChatConversation {
+  id            String    @id @default(uuid()) @db.Uuid
+  actorId       String    @map("actor_id") @db.Uuid
+  title         String    @default("新对话") @db.Text
+  archivedAt    DateTime? @map("archived_at") @db.Timestamptz(3)
+  lastMessageAt DateTime  @default(now()) @map("last_message_at") @db.Timestamptz(3)
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  actor             MemoryActor                  @relation(fields: [actorId], references: [id], onDelete: Cascade)
+  messages          ChatMessage[]
+  chatEvidence      MemoryChatEvidence[]
+  assertionReceipts MemoryChatAssertionReceipt[]
+
+  @@index([actorId, archivedAt, lastMessageAt])
+  @@map("chat_conversations")
+}
+
+/// 登录凭据与权限主体。Actor 保留长期行为来源，Actor Object 绑定当前说话者在知识图中的 Object。
+model AuthUser {
+  id                  String         @id @default(uuid()) @db.Uuid
+  loginName           String         @map("login_name") @db.Text
+  normalizedLoginName String         @unique @map("normalized_login_name") @db.Text
+  passwordHash        String         @map("password_hash") @db.Text
+  role                AuthUserRole   @default(MEMBER)
+  status              AuthUserStatus @default(ACTIVE)
+  actorId             String         @unique @map("actor_id") @db.Uuid
+  actorObjectId       String?        @unique @map("actor_object_id") @db.Uuid
+  lastLoginAt         DateTime?      @map("last_login_at") @db.Timestamptz(3)
+  createdAt           DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt           DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  actor       MemoryActor         @relation(fields: [actorId], references: [id], onDelete: Restrict)
+  actorObject MemoryGlobalObject? @relation(fields: [actorObjectId], references: [id], onDelete: SetNull)
+  sessions    AuthSession[]
+
+  @@map("auth_users")
+}
+
+/// 数据库会话只保存随机 token 的摘要；原始 token 只出现在 HttpOnly Cookie 中。
+model AuthSession {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  tokenHash  String   @unique @map("token_hash") @db.Text
+  expiresAt  DateTime @map("expires_at") @db.Timestamptz(3)
+  lastSeenAt DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(3)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user AuthUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([expiresAt])
+  @@map("auth_sessions")
+}
+
+/// 持久化浏览器实际展示的完整 AI SDK UIMessage parts，而不是只保存最终纯文本。
+model ChatMessage {
+  id              String          @id @default(uuid()) @db.Uuid
+  conversationId  String          @map("conversation_id") @db.Uuid
+  clientMessageId String          @map("client_message_id") @db.Text
+  role            ChatMessageRole
+  parts           Json
+  position        Int
+  createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime        @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  conversation ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, clientMessageId])
+  @@index([conversationId, position, createdAt])
+  @@map("chat_messages")
+}
+
+/// Assertion template 中一次 `{{fragment:...}}` 引用；ordinal 保留重复引用及出现顺序。
+model MemoryAssertionFragmentReference {
+  assertionId      String @map("assertion_id") @db.Uuid
+  objectFragmentId String @map("object_fragment_id") @db.Uuid
+  ordinal          Int
+
+  assertion      MemoryAssertion            @relation(fields: [assertionId], references: [id], onDelete: Cascade)
+  objectFragment MemorySourceObjectFragment @relation(fields: [objectFragmentId], references: [id], onDelete: Cascade)
+
+  @@id([assertionId, ordinal])
+  @@index([objectFragmentId])
+  @@map("memory_assertion_fragment_references")
+}
+
+/// Assertion 对稳定原文块的直接依据；ordinal 保留 supporting_block_ids 顺序。
+model MemoryAssertionSourceBlock {
+  assertionId String @map("assertion_id") @db.Uuid
+  blockId     String @map("block_id") @db.Uuid
+  ordinal     Int
+
+  assertion   MemoryAssertion   @relation(fields: [assertionId], references: [id], onDelete: Cascade)
+  sourceBlock MemorySourceBlock @relation(fields: [blockId], references: [id], onDelete: Cascade)
+
+  @@id([assertionId, blockId])
+  @@index([blockId])
+  @@map("memory_assertion_source_blocks")
+}
+
+/// 完整 cold-start package 最终导入的 Global Object；Resolver runtime 不读写数据库。
+model MemoryGlobalObject {
+  id              String @id @default(uuid()) @db.Uuid
+  globalObjectKey String @map("global_object_key") @db.Text
+  canonicalName   String @map("canonical_name") @db.Text
+
+  surfaceMemberships MemoryGlobalObjectSurfaceMembership[]
+  chatMentions       MemoryChatObjectMention[]
+  assertionLinks     MemoryAssertionObjectLink[]
+  assertionCoverage  MemoryAssertionObjectCoverage[]
+  higherMemory       MemoryObjectHigherMemory?
+  relatedViewCards   ViewCardRelatedObject[]
+  authUsers          AuthUser[]
+
+  @@unique([globalObjectKey])
+  @@map("memory_global_objects")
+}
+
+/// 对话 Evidence 中逐字出现、并被成功 Assertion 使用的 GlobalObject 名称。
+/// 它让聊天创建的 Object 保留可读来源，也让后续检索能够命中用户使用过的名称或简称。
+model MemoryChatObjectMention {
+  globalObjectId        String   @map("global_object_id") @db.Uuid
+  chatEvidenceId        String   @map("chat_evidence_id") @db.Uuid
+  ordinal               Int
+  surfaceForm           String   @map("surface_form") @db.Text
+  normalizedSurfaceForm String   @map("normalized_surface_form") @db.Text
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  globalObject MemoryGlobalObject @relation(fields: [globalObjectId], references: [id], onDelete: Cascade)
+  chatEvidence MemoryChatEvidence @relation(fields: [chatEvidenceId], references: [id], onDelete: Restrict)
+
+  @@id([globalObjectId, chatEvidenceId, ordinal])
+  @@unique([chatEvidenceId, ordinal])
+  @@unique([globalObjectId, chatEvidenceId, surfaceForm])
+  @@index([globalObjectId])
+  @@index([chatEvidenceId])
+  @@index([normalizedSurfaceForm])
+  @@map("memory_chat_object_mentions")
+}
+
+/// 只为对话中少数重要 GlobalObject 按需维护的高优先级认知与任务导航。
+/// Cognitive Memory 描述对象的身份、叙事、结构、运行模型和当前态势；
+/// Operational Index 保存可校验的主题覆盖、来源入口和后续检索建议。
+model MemoryObjectHigherMemory {
+  id                String   @id @default(uuid()) @db.Uuid
+  globalObjectId    String   @unique @map("global_object_id") @db.Uuid
+  cognitiveMemory   Json     @map("cognitive_memory") @db.JsonB
+  operationalIndex  Json     @default("{\"aspects\":[]}") @map("operational_index") @db.JsonB
+  maintainedAt      DateTime @map("maintained_at") @db.Timestamptz(3)
+  triggerMessageId  String   @map("trigger_message_id") @db.Text
+  maintenanceReason String   @map("maintenance_reason") @db.Text
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  globalObject MemoryGlobalObject @relation(fields: [globalObjectId], references: [id], onDelete: Cascade)
+
+  @@index([maintainedAt])
+  @@map("memory_object_higher_memories")
+}
+
+/// Sydaris 对 Workspace 身份、长期叙事与当前工作集的高层认知；每轮对话自动读取，
+/// 但不是精确业务状态的权威来源。
+/// 它不绑定 Compilation 或 GlobalObject，因此来源重编译不会使 Sydaris 丧失已从真实互动中形成的环境理解。
+model MemoryAmbientHigherMemory {
+  id                String                         @id @default(uuid()) @db.Uuid
+  scope             MemoryAmbientHigherMemoryScope @unique
+  contentMarkdown   String                         @map("content_markdown") @db.Text
+  maintainedAt      DateTime                       @map("maintained_at") @db.Timestamptz(3)
+  triggerMessageId  String                         @map("trigger_message_id") @db.Text
+  maintenanceReason String                         @map("maintenance_reason") @db.Text
+  createdAt         DateTime                       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime                       @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@index([maintainedAt])
+  @@map("memory_ambient_higher_memories")
+}
+
+/// Business View 的高层动态摘要；它不是精确业务状态的权威来源。
+model ViewHigherMemory {
+  id                String   @id @default(uuid()) @db.Uuid
+  viewKey           String   @unique @map("view_key") @db.Text
+  contentMarkdown   String   @map("content_markdown") @db.Text
+  maintainedAt      DateTime @map("maintained_at") @db.Timestamptz(3)
+  maintenanceReason String   @map("maintenance_reason") @db.Text
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  installedView InstalledView @relation(fields: [viewKey], references: [viewKey], onDelete: Cascade)
+
+  @@index([maintainedAt])
+  @@map("view_higher_memories")
+}
+
+/// 核心知识图中唯一的 Assertion–Object 边。一条边只表示该 Object 实际参与该 Assertion；
+/// Assertion 内容解析、核心图连接和 Object Higher Memory 传播都只认这一张表。
+model MemoryAssertionObjectLink {
+  assertionId    String @map("assertion_id") @db.Uuid
+  globalObjectId String @map("global_object_id") @db.Uuid
+
+  assertion    MemoryAssertion                   @relation(fields: [assertionId], references: [id], onDelete: Cascade)
+  globalObject MemoryGlobalObject                @relation(fields: [globalObjectId], references: [id], onDelete: Restrict)
+  occurrences  MemoryAssertionObjectOccurrence[]
+
+  @@id([assertionId, globalObjectId])
+  @@index([globalObjectId])
+  @@map("memory_assertion_object_links")
+}
+
+/// Assertion 中一次可审计的 Object 原文出现。它从属于规范边，不参与决定知识图连接。
+model MemoryAssertionObjectOccurrence {
+  atomId         String @id @map("atom_id") @db.Text
+  assertionId    String @map("assertion_id") @db.Uuid
+  globalObjectId String @map("global_object_id") @db.Uuid
+  ordinal        Int
+  sourceStart    Int    @map("source_start")
+  sourceEnd      Int    @map("source_end")
+  sourceText     String @map("source_text") @db.Text
+
+  link MemoryAssertionObjectLink @relation(fields: [assertionId, globalObjectId], references: [assertionId, globalObjectId], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([assertionId, ordinal])
+  @@index([globalObjectId])
+  @@map("memory_assertion_object_occurrences")
+}
+
+/// Reference Assertion 或其他信息载体对 Object 的检索覆盖。它只用于召回，
+/// 不属于核心知识图，也不能触发 Object Higher Memory 的对象级传播。
+model MemoryAssertionObjectCoverage {
+  assertionId    String @map("assertion_id") @db.Uuid
+  globalObjectId String @map("global_object_id") @db.Uuid
+
+  assertion    MemoryAssertion    @relation(fields: [assertionId], references: [id], onDelete: Cascade)
+  globalObject MemoryGlobalObject @relation(fields: [globalObjectId], references: [id], onDelete: Restrict)
+
+  @@id([assertionId, globalObjectId])
+  @@index([globalObjectId])
+  @@map("memory_assertion_object_coverage")
+}
+
+/// 一个 source-local surface form 当前归属哪个 Global Object。
+model MemoryGlobalObjectSurfaceMembership {
+  objectFragmentId   String @map("object_fragment_id") @db.Uuid
+  surfaceFormOrdinal Int    @map("surface_form_ordinal")
+  globalObjectId     String @map("global_object_id") @db.Uuid
+
+  objectFragment MemorySourceObjectFragment @relation(fields: [objectFragmentId], references: [id], onDelete: Cascade)
+  globalObject   MemoryGlobalObject         @relation(fields: [globalObjectId], references: [id], onDelete: Restrict)
+
+  @@id([objectFragmentId, surfaceFormOrdinal])
+  @@index([globalObjectId])
+  @@map("memory_global_object_surface_memberships")
+}
+
+/// 唯一 Shared Brain 的 Assertion 向量索引状态。
+model MemoryAssertionEmbeddingIndex {
+  id                    String   @id @default("shared") @db.Text
+  modelKey              String   @map("model_key") @db.Text
+  modelRevision         String   @map("model_revision") @db.Text
+  dimension             Int
+  indexedAssertionCount Int      @map("indexed_assertion_count")
+  indexedAt             DateTime @default(now()) @map("indexed_at")
+
+  @@map("memory_assertion_embedding_indexes")
+}
+
+/// Search 派生的 Assertion BGE-M3 向量；可在基础记忆重新导入后完整重建。
+model MemoryAssertionEmbedding {
+  assertionId String                      @id @map("assertion_id") @db.Uuid
+  contentHash String                      @map("content_hash") @db.Text
+  embedding   Unsupported("vector(1024)")
+  createdAt   DateTime                    @default(now()) @map("created_at")
+
+  assertion MemoryAssertion @relation(fields: [assertionId], references: [id], onDelete: Cascade)
+
+  @@map("memory_assertion_embeddings")
+}
+
+/// 已安装 View 的持久化运行状态。所有 View 共享同一套 Runtime API。
+model InstalledView {
+  viewKey       String              @id @map("view_key") @db.Text
+  moduleId      String              @map("module_id") @db.Text
+  /// 所属 Plugin 的发布版本，仅用于诊断；数据兼容性只由 schemaVersion 决定。
+  pluginVersion String              @map("module_version") @db.Text
+  schemaVersion String              @map("schema_version") @db.Text
+  stateVersion  BigInt              @default(0) @map("state_version")
+  status        InstalledViewStatus @default(enabled)
+  settingsJson  Json                @map("settings_json") @db.JsonB
+  createdAt     DateTime            @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt     DateTime            @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  cards        ViewCard[]
+  proposals    ViewCommandProposal[]
+  executions   ViewCommandExecution[]
+  reactions    ViewChangeReaction[]
+  higherMemory ViewHigherMemory?
+
+  @@map("installed_views")
+}
+
+/// View-local identity 的 Card；不使用 Compilation 或 Object 充当 Card identity。
+model ViewCard {
+  id          String   @id @default(uuid()) @db.Uuid
+  viewKey     String   @map("view_key") @db.Text
+  cardTypeKey String   @map("card_type_key") @db.Text
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  installedView  InstalledView           @relation(fields: [viewKey], references: [viewKey], onDelete: Restrict)
+  dimensions     ViewDimensionValue[]
+  outgoingSlots  ViewSlotBinding[]       @relation("ViewSlotSource")
+  incomingSlots  ViewSlotBinding[]       @relation("ViewSlotTarget")
+  relatedObjects ViewCardRelatedObject[]
+
+  @@index([viewKey, cardTypeKey])
+  @@map("view_cards")
+}
+
+/// Schema 声明的强类型 Dimension 值；值以 JSONB 存储并由 Runtime 校验。
+model ViewDimensionValue {
+  cardId       String   @map("card_id") @db.Uuid
+  dimensionKey String   @map("dimension_key") @db.Text
+  valueJson    Json     @map("value_json") @db.JsonB
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  card ViewCard @relation(fields: [cardId], references: [id], onDelete: Cascade)
+
+  @@id([cardId, dimensionKey])
+  @@map("view_dimension_values")
+}
+
+/// 仅允许连接同一 View 内 Card 的 Slot binding。
+model ViewSlotBinding {
+  sourceCardId String   @map("source_card_id") @db.Uuid
+  slotKey      String   @map("slot_key") @db.Text
+  targetCardId String   @map("target_card_id") @db.Uuid
+  position     Int      @default(0)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  sourceCard ViewCard @relation("ViewSlotSource", fields: [sourceCardId], references: [id], onDelete: Cascade)
+  targetCard ViewCard @relation("ViewSlotTarget", fields: [targetCardId], references: [id], onDelete: Restrict)
+
+  @@id([sourceCardId, slotKey, targetCardId])
+  @@index([targetCardId])
+  @@index([sourceCardId, slotKey, position])
+  @@map("view_slot_bindings")
+}
+
+/// Card 与稳定认知 Object 的极简关联；没有 role、relation type 或 Assertion support。
+model ViewCardRelatedObject {
+  cardId    String   @map("card_id") @db.Uuid
+  objectId  String   @map("object_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  card   ViewCard           @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  object MemoryGlobalObject @relation(fields: [objectId], references: [id], onDelete: Restrict)
+
+  @@id([cardId, objectId])
+  @@index([objectId])
+  @@map("view_card_related_objects")
+}
+
+/// AI/Skill 在 approval_required 模式下保存的 Domain Command Proposal。
+model ViewCommandProposal {
+  id                   String         @id @default(uuid()) @db.Uuid
+  viewKey              String         @map("view_key") @db.Text
+  commandKey           String         @map("command_key") @db.Text
+  commandVersion       String         @map("command_version") @db.Text
+  inputJson            Json           @map("input_json") @db.JsonB
+  /// Proposal 创建时的并发基线；默认严格校验，只有 Command 明确声明安全时才在最新状态重放。
+  expectedStateVersion BigInt         @map("expected_state_version")
+  proposedByActorId    String?        @map("proposed_by_actor_id") @db.Uuid
+  skillId              String?        @map("skill_id") @db.Text
+  executionId          String?        @unique @map("execution_id") @db.Uuid
+  status               ProposalStatus @default(pending)
+  failureReason        String?        @map("failure_reason") @db.Text
+  createdAt            DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  decidedAt            DateTime?      @map("decided_at") @db.Timestamptz(3)
+  appliedAt            DateTime?      @map("applied_at") @db.Timestamptz(3)
+
+  installedView InstalledView         @relation(fields: [viewKey], references: [viewKey], onDelete: Restrict)
+  execution     ViewCommandExecution? @relation(fields: [executionId], references: [id], onDelete: SetNull)
+
+  @@index([viewKey, status, createdAt])
+  @@map("view_command_proposals")
+}
+
+model ViewCommandExecution {
+  id                 String               @id @default(uuid()) @db.Uuid
+  viewKey            String               @map("view_key") @db.Text
+  commandKey         String               @map("command_key") @db.Text
+  commandVersion     String               @map("command_version") @db.Text
+  inputJson          Json                 @map("input_json") @db.JsonB
+  actorId            String?              @map("actor_id") @db.Uuid
+  initiator          ViewCommandInitiator
+  skillId            String?              @map("skill_id") @db.Text
+  stateVersionBefore BigInt               @map("state_version_before")
+  stateVersionAfter  BigInt               @map("state_version_after")
+  resultSummaryJson  Json?                @map("result_summary_json") @db.JsonB
+  changeSetJson      Json                 @default("[]") @map("change_set_json") @db.JsonB
+  eventsJson         Json                 @default("[]") @map("events_json") @db.JsonB
+  createdAt          DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  installedView InstalledView        @relation(fields: [viewKey], references: [viewKey], onDelete: Restrict)
+  proposal      ViewCommandProposal?
+  reaction      ViewChangeReaction?
+
+  @@index([viewKey, createdAt])
+  @@map("view_command_executions")
+}
+
+/// Runtime-owned semantic reaction to a committed View change. Presentation code consumes this
+/// headlessly and remains free to decide whether and how each state is rendered.
+model ViewChangeReaction {
+  id                    String                      @id @default(uuid()) @db.Uuid
+  executionId           String                      @unique @map("execution_id") @db.Uuid
+  viewKey               String                      @map("view_key") @db.Text
+  actorId               String?                     @map("actor_id") @db.Uuid
+  stateVersion          BigInt                      @map("state_version")
+  targetsJson           Json                        @map("targets_json") @db.JsonB
+  priorObjectsJson      Json                        @default("[]") @map("prior_objects_json") @db.JsonB
+  attentionPolicy       String                      @map("attention_policy") @db.Text
+  attentionStatus       ViewReactionAttentionStatus @map("attention_status")
+  knowledgePolicy       String                      @map("knowledge_policy") @db.Text
+  knowledgeStatus       ViewReactionKnowledgeStatus @map("knowledge_status")
+  guidanceJson          Json                        @default("[]") @map("guidance_json") @db.JsonB
+  message               String?                     @db.Text
+  reason                String?                     @db.Text
+  attentionErrorMessage String?                     @map("attention_error_message") @db.Text
+  knowledgeErrorMessage String?                     @map("knowledge_error_message") @db.Text
+  settleUntil           DateTime                    @map("settle_until") @db.Timestamptz(3)
+  attentionStartedAt    DateTime?                   @map("attention_started_at") @db.Timestamptz(3)
+  attentionCompletedAt  DateTime?                   @map("attention_completed_at") @db.Timestamptz(3)
+  knowledgeStartedAt    DateTime?                   @map("knowledge_started_at") @db.Timestamptz(3)
+  knowledgeCompletedAt  DateTime?                   @map("knowledge_completed_at") @db.Timestamptz(3)
+  seenAt                DateTime?                   @map("seen_at") @db.Timestamptz(3)
+  createdAt             DateTime                    @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime                    @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  execution     ViewCommandExecution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+  installedView InstalledView        @relation(fields: [viewKey], references: [viewKey], onDelete: Restrict)
+
+  @@index([actorId, viewKey, createdAt])
+  @@index([attentionStatus, settleUntil])
+  @@index([knowledgeStatus, settleUntil])
+  @@map("view_change_reactions")
+}
+
+/// 对 GlobalObject 身份的可审计修改建议；批准前不改变名称、归属或 Assertion 引用。
+model MemoryObjectChangeProposal {
+  id            String         @id @default(uuid()) @db.Uuid
+  status        ProposalStatus @default(pending)
+  reason        String         @db.Text
+  payload       Json           @db.JsonB
+  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  decidedAt     DateTime?      @map("decided_at") @db.Timestamptz(3)
+  appliedAt     DateTime?      @map("applied_at") @db.Timestamptz(3)
+  failureReason String?        @map("failure_reason") @db.Text
+
+  @@index([status, createdAt])
+  @@map("memory_object_change_proposals")
+}

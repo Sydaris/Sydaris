@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "rootDir": "..",
+    "outDir": "../.prisma-assertion-index-build",
+    "declaration": false,
+    "sourceMap": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "types": ["node"]
+  },
+  "include": [
+    "./index-assertions.ts",
+    "../src/memory/embedding-client.ts",
+    "../src/memory/resolved-assertion.ts",
+    "../src/generated/prisma/**/*.ts"
+  ]
+}
