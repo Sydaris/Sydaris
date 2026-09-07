@@ -1,6 +1,10 @@
-import { jsonSchema, tool, type ToolSet } from "ai";
+import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 
+import {
+  createContractModelToolSchema,
+  createModelToolSchema,
+} from "@/ai/model-tool-schema";
 import type {
   ActorContext,
   CommandInputReferenceDefinition,
@@ -23,6 +27,70 @@ export function registeredViewKeySchema(registry: ExtensionRegistry) {
     (viewKey) => Boolean(registry.getView(viewKey)),
     { message: "View 未注册或未启用" },
   );
+}
+
+const viewCommandInputSchema = z.record(z.string(), z.unknown());
+
+function runViewCommandRuntimeSchema(registry: ExtensionRegistry) {
+  const command = z.object({
+    commandKey: z.string().trim().min(1),
+    input: viewCommandInputSchema,
+  }).strict();
+  return z.union([
+    z.object({
+      viewKey: registeredViewKeySchema(registry),
+      commandKey: z.string().trim().min(1),
+      input: viewCommandInputSchema,
+    }).strict(),
+    z.object({
+      viewKey: registeredViewKeySchema(registry),
+      commands: z.array(command).min(1).max(20),
+    }).strict(),
+  ]);
+}
+
+function runViewCommandModelSchema(registry: ExtensionRegistry) {
+  const viewKeys = registry.listViews().map((view) => view.manifest.key);
+  const commandInput = {
+    type: "object",
+    additionalProperties: true,
+    description: "所选 Domain Command 的输入对象；字段必须遵守 openActions 返回的契约。",
+  };
+  return {
+    $schema: "http://json-schema.org/draft-07/schema#",
+    type: "object",
+    description:
+      "提交一条或一批 View Command。只使用 commandKey+input 或 commands 其中一种形式；批量优先。",
+    properties: {
+      viewKey: {
+        type: "string",
+        ...(viewKeys.length ? { enum: viewKeys } : {}),
+      },
+      commandKey: {
+        type: "string",
+        minLength: 1,
+        description: "单条模式的 Domain Command key；使用 commands 时省略。",
+      },
+      input: commandInput,
+      commands: {
+        type: "array",
+        minItems: 1,
+        maxItems: 20,
+        description: "批量模式；即使只有一条也可以使用长度为 1 的数组。",
+        items: {
+          type: "object",
+          properties: {
+            commandKey: { type: "string", minLength: 1 },
+            input: commandInput,
+          },
+          required: ["commandKey", "input"],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ["viewKey"],
+    additionalProperties: false,
+  } as const;
 }
 
 function normalizedObjectName(value: string): string {
@@ -186,6 +254,13 @@ export function createAgentViewToolset(input: {
   commandBus: ViewCommandBus;
   skillSession?: AgentSkillSession;
   onCommandAttempt?: () => void;
+  onCommandResult?: (result: {
+    viewKey: string;
+    attemptedCount: number;
+    proposedCount: number;
+    executedCount: number;
+    invalidCount: number;
+  }) => void;
   onProposal?: (proposal: ViewCommandProposalNotice) => void;
   onQueryResult?: (result: {
     viewKey: string;
@@ -426,6 +501,14 @@ export function createAgentViewToolset(input: {
     return pending;
   };
 
+  const refreshSnapshot = (viewKey: string) => {
+    snapshots.delete(viewKey);
+    for (const [ref, reference] of referenceByRef) {
+      if (reference.target.viewKey === viewKey) presentedCardRefs.delete(ref);
+    }
+    return readSnapshot(viewKey);
+  };
+
   const presentCards = (
     cards: readonly ViewReadSnapshot["cards"][number][],
     objectRefById: ReadonlyMap<string, string> = new Map(),
@@ -486,7 +569,10 @@ export function createAgentViewToolset(input: {
           "输入契约独立且精确；只使用本 Query Schema 声明的字段，不要沿用其他 Query 的参数。",
           "只读取该 View 已观察到的正式 Snapshot；返回业务结果及可引用的 View/Card refs。coverage 与 evidence semantics 由服务端单独记录，不属于回答正文。",
         ].join("\n"),
-        inputSchema: jsonSchema(query.inputSchema.jsonSchema),
+        inputSchema: createContractModelToolSchema(
+          `View Query ${view.manifest.key}.${query.key}`,
+          query.inputSchema,
+        ),
         execute: async (value) => {
           if (!inspectedViews.has(view.manifest.key)) {
             throw new ViewRuntimeError(
@@ -640,17 +726,11 @@ export function createAgentViewToolset(input: {
         "Command 中的 Card 引用必须使用本轮 readViewState 返回的真实 V#。新建关联 Card 时只填写 Command 声明的自然语言实体名称；Runtime 会用本轮 O#、别名或唯一 canonical name 自动绑定 Object，模型禁止填写或索要数据库 UUID。",
         "只使用 openActions 返回的当前目标 View Command 契约；不要调用其他 View 的 Command。",
       ].join("\n"),
-      inputSchema: z.union([z.object({
-        viewKey: registeredViewKeySchema(registry),
-        commandKey: z.string().trim().min(1),
-        input: z.unknown(),
-      }), z.object({
-        viewKey: registeredViewKeySchema(registry),
-        commands: z.array(z.object({
-          commandKey: z.string().trim().min(1),
-          input: z.unknown(),
-        })).min(1).max(20),
-      })]),
+      inputSchema: createModelToolSchema({
+        name: "runViewCommand",
+        jsonSchema: runViewCommandModelSchema(registry),
+        parse: (value) => runViewCommandRuntimeSchema(registry).parse(value),
+      }),
       execute: async (request) => {
         input.onCommandAttempt?.();
         if (!inspectedViews.has(request.viewKey)) {
@@ -712,6 +792,10 @@ export function createAgentViewToolset(input: {
             if (!(error instanceof ViewRuntimeError) && !(error instanceof z.ZodError)) {
               throw error;
             }
+            if (error.message.includes("stateVersion")) {
+              snapshots.delete(commandRequest.viewKey);
+              inspectedViews.delete(commandRequest.viewKey);
+            }
             results.push({
               kind: "invalid",
               viewKey: commandRequest.viewKey,
@@ -721,6 +805,14 @@ export function createAgentViewToolset(input: {
             });
           }
         }
+        const outcome = {
+          viewKey: request.viewKey,
+          attemptedCount: results.length,
+          proposedCount: results.filter((result) => result?.kind === "proposed").length,
+          executedCount: results.filter((result) => result?.kind === "executed").length,
+          invalidCount: results.filter((result) => result?.kind === "invalid").length,
+        };
+        input.onCommandResult?.(outcome);
         if (!("commands" in request)) return results[0];
         const resultEntries = results.map((result, index) => ({
           request: requests[index],
@@ -772,6 +864,7 @@ export function createAgentViewToolset(input: {
   return {
     tools,
     readSnapshot,
+    refreshSnapshot,
     locateObjectViews,
     presentCards,
     resolveCardReference,

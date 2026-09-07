@@ -5,9 +5,12 @@ import type { ClubChatMessage } from "@/ai/types";
 import {
   appendAssistantTextMessage,
   ChatConversationAccessError,
+  compactChatMessageForPersistence,
   hasPersistableChatContent,
   loadChatMessages,
+  reserveChatTurn,
   saveChatMessage,
+  withTerminalChatState,
 } from "@/chat/persistence";
 
 const actor = {
@@ -26,9 +29,14 @@ function databaseFixture(rows: unknown[] = []) {
         lastMessageAt: new Date("2026-08-16T00:00:00.000Z"),
         createdAt: new Date("2026-08-16T00:00:00.000Z"),
       }),
-      update: vi.fn().mockResolvedValue(undefined),
+      update: vi.fn().mockImplementation((input: { select?: { nextMessagePosition?: boolean } }) =>
+        input.select?.nextMessagePosition
+          ? Promise.resolve({ nextMessagePosition: 6 })
+          : Promise.resolve(undefined)),
     },
     chatMessage: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      update: vi.fn().mockResolvedValue(undefined),
       aggregate: vi.fn().mockResolvedValue({ _max: { position: 4 } }),
       create: vi.fn().mockResolvedValue(undefined),
       upsert: vi.fn().mockResolvedValue(undefined),
@@ -47,6 +55,50 @@ beforeEach(() => {
 });
 
 describe("chat persistence", () => {
+  it("drops raw tool payloads and repeated snapshots before saving assistant history", () => {
+    const message = {
+      id: "assistant-large",
+      role: "assistant",
+      parts: [
+        { type: "step-start" },
+        {
+          type: "dynamic-tool",
+          toolName: "readSourceDocument",
+          toolCallId: "tool-1",
+          state: "output-available",
+          input: { mode: "full" },
+          output: { blocks: [{ markdown: "不应进入聊天历史的大段正文" }] },
+        },
+        {
+          type: "data-memorySearch",
+          data: { mode: "structured", seedMap: { assertions: [{ renderedStatement: "旧快照" }] } },
+        },
+        { type: "step-start" },
+        { type: "text", text: "最终回答" },
+        {
+          type: "data-memorySearch",
+          data: { mode: "structured", seedMap: { assertions: [{ renderedStatement: "最终快照" }] } },
+        },
+        {
+          type: "data-answerLifecycle",
+          data: { phase: "answer_complete" },
+        },
+      ],
+    } as unknown as ClubChatMessage;
+
+    const compacted = compactChatMessageForPersistence(message);
+    const serialized = JSON.stringify(compacted);
+
+    expect(serialized).not.toContain("不应进入聊天历史的大段正文");
+    expect(serialized).not.toContain("旧快照");
+    expect(serialized).toContain("最终回答");
+    expect(serialized).toContain("最终快照");
+    expect(compacted.parts).toContainEqual({
+      type: "data-answerLifecycle",
+      data: { phase: "answer_complete" },
+    });
+  });
+
   it("keeps reasoning-only and stream-status-only assistant diagnostics", () => {
     expect(hasPersistableChatContent({
       id: "assistant-reasoning",
@@ -70,6 +122,31 @@ describe("chat persistence", () => {
         },
       }],
     })).toBe(true);
+  });
+
+  it("adds terminal lifecycle and the authoritative final stream status before persistence", () => {
+    const message = {
+      id: "assistant-partial",
+      role: "assistant",
+      parts: [{ type: "text", text: "局部结果" }],
+    } as ClubChatMessage;
+    const status = {
+      status: "incomplete" as const,
+      completionKind: "tool_call" as const,
+      finishReason: "tool-calls",
+      reasoningChars: 10,
+      contentChars: 4,
+      toolCallCount: 2,
+      modelCallCount: 3,
+      retryCount: 0,
+      partial: true,
+    };
+
+    expect(withTerminalChatState(message, status).parts).toEqual([
+      { type: "text", text: "局部结果" },
+      { type: "data-streamStatus", data: status },
+      { type: "data-answerLifecycle", data: { phase: "answer_complete" } },
+    ]);
   });
 
   it("upserts complete UI message parts by stable client message id", async () => {
@@ -109,7 +186,6 @@ describe("chat persistence", () => {
       update: expect.objectContaining({
         role: "ASSISTANT",
         parts: message.parts,
-        position: 2,
       }),
       create: expect.objectContaining({
         clientMessageId: "assistant-1",
@@ -118,6 +194,65 @@ describe("chat persistence", () => {
         position: 2,
       }),
     });
+  });
+
+  it("reserves durable user and assistant positions from the server counter", async () => {
+    const { database, transaction } = databaseFixture();
+    transaction.chatConversation.update
+      .mockResolvedValueOnce({ nextMessagePosition: 18 })
+      .mockResolvedValueOnce(undefined);
+
+    const positions = await reserveChatTurn({
+      actor,
+      conversationId,
+      userMessage: {
+        id: "user-after-gap",
+        role: "user",
+        parts: [{ type: "text", text: "继续" }],
+      },
+    }, database as never);
+
+    expect(positions).toEqual({ userPosition: 16, assistantPosition: 17 });
+    expect(transaction.chatConversation.update).toHaveBeenNthCalledWith(1, {
+      where: { id: conversationId },
+      data: { nextMessagePosition: { increment: 2 } },
+      select: { nextMessagePosition: true },
+    });
+    expect(transaction.chatMessage.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        clientMessageId: "user-after-gap",
+        position: 16,
+      }),
+    });
+    expect(transaction.chatMessage.aggregate).not.toHaveBeenCalled();
+  });
+
+  it("keeps the original durable position when the same user message is retried", async () => {
+    const { database, transaction } = databaseFixture();
+    transaction.chatMessage.findUnique.mockResolvedValue({ position: 12 });
+
+    const positions = await reserveChatTurn({
+      actor,
+      conversationId,
+      userMessage: {
+        id: "user-retry",
+        role: "user",
+        parts: [{ type: "text", text: "重试" }],
+      },
+    }, database as never);
+
+    expect(positions).toEqual({ userPosition: 12, assistantPosition: 13 });
+    expect(transaction.chatMessage.update).toHaveBeenCalledWith({
+      where: {
+        conversationId_clientMessageId: {
+          conversationId,
+          clientMessageId: "user-retry",
+        },
+      },
+      data: expect.objectContaining({ parts: [{ type: "text", text: "重试" }] }),
+    });
+    expect(transaction.chatConversation.update).not.toHaveBeenCalled();
+    expect(transaction.chatMessage.create).not.toHaveBeenCalled();
   });
 
   it("appends proactive assistant text after the latest persisted position", async () => {
@@ -141,6 +276,21 @@ describe("chat persistence", () => {
         position: 5,
       }),
     });
+  });
+
+  it("does not append the same proactive notice twice", async () => {
+    const { database, transaction } = databaseFixture();
+    transaction.chatMessage.findUnique.mockResolvedValue({ id: "stored-message" });
+
+    const message = await appendAssistantTextMessage({
+      actor,
+      conversationId,
+      text: "请确认当前正式口径。",
+      messageId: "view-reaction-reaction-1",
+    }, database as never);
+
+    expect(message.id).toBe("view-reaction-reaction-1");
+    expect(transaction.chatMessage.create).not.toHaveBeenCalled();
   });
 
   it("persists partial text, reasoning, and failure status from an interrupted UI stream", async () => {

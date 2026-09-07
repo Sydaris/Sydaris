@@ -23,6 +23,11 @@ export function testView(key: string, label: string): ViewModule {
 
 export const planningView: ViewModule = {
   ...testView("test_planning", "测试计划"),
+  manifest: {
+    ...testView("test_planning", "测试计划").manifest,
+    retrievalDescription: "准备推进一项测试工作",
+    aiWriteCapabilities: ["创建或更新具体工作"],
+  },
   commands: [{
     key: "work.create", version: "1", label: "Create work",
     allowedInitiators: ["human", "ai"], requiredPermissions: ["view.write"],
@@ -59,4 +64,15 @@ export const directoryView: ViewModule = {
 export const directoryPlugin: PluginManifest = {
   id: "test.directory", version: "1.0.0",
   contributes: { views: [directoryView] },
+};
+
+export const readOnlyPlugin: PluginManifest = {
+  id: "test.read-only", version: "1.0.0",
+  contributes: { views: [{
+    ...testView("test_read_only", "只读记录"),
+    manifest: {
+      ...testView("test_read_only", "只读记录").manifest,
+      dataBoundaries: ["AI 不能直接创建或修改外部记录"],
+    },
+  }] },
 };
