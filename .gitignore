@@ -35,6 +35,9 @@ yarn-error.log*
 .pnpm-debug.log*
 /.sydaris-debug
 /.sydaris-snapshots
+/.sydaris-states
+/.sydaris-instances
+/.next-*
 /.playwright-cli
 
 # env files (can opt-in for committing if needed)

@@ -53,7 +53,8 @@ View Module 的本体是 Card Schema 与业务运行规则。
 ### Presentation
 
 - Generic Inspector 始终只读。
-- 专属 Presentation 可以提供业务操作 UI，但只能调用 Domain Command。
+- 专属 Presentation 通过 SDK 调用 Domain Command 或声明的 View Operation。
+- Presentation 不得依赖宿主中的业务专用 API route。
 - Presentation 不得直接写数据库、Card Graph 或构造 Raw Graph Mutation。
 - Presentation 通过目标 `ViewManifest.version` 表达它所面向的 View Module 合同。
 
@@ -69,6 +70,22 @@ View Module 的本体是 Card Schema 与业务运行规则。
 - Capability Contract 由 Sydaris 定义 key、version、input/output schema、语义和权限。
 - Provider 只提供 `execute` 实现，不得重新声明同名 Contract Schema。
 - Tool Provider 不得直接修改 View State。Tool 结果需要进入业务状态时，应再调用 Domain Command。
+
+### View Operation
+
+- View Operation 是插件自己的服务端编排，必须声明 Tool Capabilities、同 View system Commands 和用户权限。
+- Runtime 提供受限执行上下文；Operation 不得导入 ToolRuntime、CommandBus、Prisma 或 Shell。
+- 宿主只提供通用 `/api/views/:viewKey/operations/:operationKey`。
+
+### Core 与下游
+
+Sydaris 仓库维护通用 Runtime、SDK、合同与通用测试。View 插件实现、专属 Presentation、
+组织品牌资源和默认插件安装配置由下游或独立插件仓库维护。Core 测试使用最小合成合同，
+不得依赖乒协插件实现；测试夹具不进入安装注册表。
+
+通用修改优先在 Sydaris 提交；下游通过明确的上游提交或版本同步并验证自身插件。
+SDK 的 `repository`、`bugs` 和 `homepage` 始终指向本仓库。发布版本需单独确认，
+同步源码不会自动发布 npm 包。
 
 ### Composition Root
 
