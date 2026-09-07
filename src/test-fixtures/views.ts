@@ -44,7 +44,19 @@ export const planningPlugin: PluginManifest = {
   id: "test.planning", version: "1.0.0", contributes: { views: [planningView] },
 };
 
+export const directoryView: ViewModule = {
+  ...testView("test_directory", "测试目录"),
+  schema: {
+    viewKey: "test_directory", schemaVersion: "1",
+    cardTypes: [{
+      key: "WorkCard", label: "Record", description: "A synthetic directory entry",
+      dimensions: [{ key: "rating", label: "Rating", type: "text", description: "测试记录的正式等级，不是纯展示文字" }],
+      slots: [],
+    }],
+  },
+};
+
 export const directoryPlugin: PluginManifest = {
   id: "test.directory", version: "1.0.0",
-  contributes: { views: [testView("test_directory", "测试目录")] },
+  contributes: { views: [directoryView] },
 };

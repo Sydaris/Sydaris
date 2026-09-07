@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Recoverable compilation and memory continuity
+
+- Recover interrupted Library compilation and rebuild Assertion indexes after
+  restarts or temporary embedding-service failures.
+- Resolve document objects from explicit evidence links and identity hints.
+- Preserve Actor/Object memory continuity and record shared/private Higher Memory
+  maintenance outcomes in the conversation's operational receipt.
+- Unify model thinking and structured-output configuration across the TypeScript
+  and Python runtimes.
+
+Ported through downstream `ad0dc7e`. Apply migrations with `pnpm prisma:deploy`
+before starting the updated application. The two additive migrations create the
+Assertion index recovery job and add Higher Memory maintenance receipt fields;
+they do not rebuild or clear existing organization data.
+
 ### Agent Runtime and library intake
 
 - Compose multiple Skills in one turn, enforce their declared View and resource
