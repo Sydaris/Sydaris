@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Development tools
+
+- Save, verify, restore, and recover complete local database/Library/parser states.
+- Run isolated parsing instances with separate databases, storage, and Next build
+  directories while retaining SDK-only builds and empty plugin registration.
+- Document Core/downstream ownership and remove machine-specific deployment examples.
+
+Development scripts are ported through downstream `1619afa`; they do not add
+View plugins or publish packages. The application retains its existing alpha
+release version until a release is explicitly prepared.
+
 ### Tool and interaction reliability
 
 - Enforce portable object-envelope tool schemas and Skill action activation gates.

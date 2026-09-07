@@ -4,7 +4,7 @@
 
 Sydaris is an open-source runtime for sustained collaboration between people and AI. It turns organizational sources into traceable shared cognition, keeps live work in explicit business views, and lets agents participate through governed actions whose outcomes shape future context.
 
-Initial public release: `v0.1.0-alpha.1`
+Initial public release: `v0.1.0-alpha.1`. See [unreleased changes](CHANGELOG.md) for the current development branch.
 
 ## One continuous workspace
 
@@ -204,6 +204,14 @@ pnpm build
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for architecture boundaries, development workflow, and verification requirements.
+
+## Local development state
+
+Save and restore a complete local database, Library, and parsing checkpoint with
+`pnpm state:save`, `state:verify`, and `state:load`. Run long parsing jobs separately
+with the `instance:*` commands, using their own database, storage, and build directory.
+See [state management](STATE_MANAGEMENT.md) and [isolated instances](INSTANCE_MANAGEMENT.md).
+These optional scripts require PostgreSQL CLI tools, zsh, and ripgrep.
 
 ## License
 
