@@ -46,6 +46,10 @@ describe("Answer Stream Governor", () => {
       id: "answer",
       delta: "原始回答",
     });
+    expect(chunks).toContainEqual({
+      type: "data-answerLifecycle",
+      data: { phase: "answer_complete" },
+    });
     expect(onDirectStream).toHaveBeenCalled();
   });
 
@@ -63,5 +67,26 @@ describe("Answer Stream Governor", () => {
       id: "grounded-final-answer",
       delta: "校验后回答",
     });
+    expect(chunks).toContainEqual({
+      type: "data-answerLifecycle",
+      data: { phase: "answer_complete" },
+    });
+  });
+
+  it("emits the terminal lifecycle before an abort chunk", async () => {
+    const chunks = await collect(governFinalAnswerStream(
+      streamOf([
+        { type: "start-step" },
+        { type: "abort", reason: "upstream closed" },
+      ]),
+      () => "",
+      () => false,
+      vi.fn(),
+    ));
+
+    const lifecycleIndex = chunks.findIndex((chunk) => chunk.type === "data-answerLifecycle");
+    const abortIndex = chunks.findIndex((chunk) => chunk.type === "abort");
+    expect(lifecycleIndex).toBeGreaterThanOrEqual(0);
+    expect(abortIndex).toBeGreaterThan(lifecycleIndex);
   });
 });

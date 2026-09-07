@@ -115,6 +115,7 @@ function runtimeFixture(
         Promise.resolve({
           id: "reaction-1",
           ...data,
+          evidenceStatus: data.evidenceStatus ?? "not_checked",
           message: null,
           reason: null,
           attentionErrorMessage: null,
@@ -597,7 +598,11 @@ describe("ViewCommandBus", () => {
       summary: { accepted: true },
       reaction: {
         id: "reaction-1",
-        attention: { policy: "never", status: "not_required" },
+        attention: {
+          policy: "never",
+          status: "not_required",
+          evidenceStatus: "not_checked",
+        },
         knowledge: { policy: "reconcile", status: "queued" },
       },
     });

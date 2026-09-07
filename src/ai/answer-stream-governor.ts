@@ -15,6 +15,7 @@ export function governFinalAnswerStream<T extends UIMessageChunk>(
   let lastCompletedText = "";
   let pendingFinishStep: UIMessageChunk | undefined;
   let answerEmitted = false;
+  let answerCompleted = false;
   let currentStepBuffered: boolean | undefined;
 
   const bufferCurrentStep = () => {
@@ -29,6 +30,16 @@ export function governFinalAnswerStream<T extends UIMessageChunk>(
     controller.enqueue({ type: "text-start", id });
     if (text) controller.enqueue({ type: "text-delta", id, delta: text });
     controller.enqueue({ type: "text-end", id });
+  };
+  const emitAnswerComplete = (
+    controller: TransformStreamDefaultController<UIMessageChunk>,
+  ) => {
+    if (answerCompleted) return;
+    answerCompleted = true;
+    controller.enqueue({
+      type: "data-answerLifecycle",
+      data: { phase: "answer_complete" },
+    });
   };
 
   return stream.pipeThrough(new TransformStream<UIMessageChunk, UIMessageChunk>({
@@ -71,6 +82,14 @@ export function governFinalAnswerStream<T extends UIMessageChunk>(
           if (pendingFinishStep) emitAnswer(controller);
           if (pendingFinishStep) controller.enqueue(pendingFinishStep);
           pendingFinishStep = undefined;
+          emitAnswerComplete(controller);
+          controller.enqueue(chunk);
+          return;
+        case "abort":
+          // Some UI stream consumers stop reading as soon as they observe an
+          // abort chunk. Publish the terminal lifecycle before it so the
+          // composer can leave its generating state deterministically.
+          emitAnswerComplete(controller);
           controller.enqueue(chunk);
           return;
         default:
@@ -82,6 +101,7 @@ export function governFinalAnswerStream<T extends UIMessageChunk>(
         emitAnswer(controller);
       }
       if (pendingFinishStep) controller.enqueue(pendingFinishStep);
+      emitAnswerComplete(controller);
     },
   })) as ReadableStream<T>;
 }

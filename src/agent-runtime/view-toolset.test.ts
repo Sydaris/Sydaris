@@ -76,6 +76,63 @@ async function runCreateActivity(
 }
 
 describe("Agent View Toolset foreground Object binding", () => {
+  it("refreshes an explicitly requested View snapshot", async () => {
+    const { readPort, toolset } = fixture();
+    readPort.query
+      .mockResolvedValueOnce({
+        viewKey: "test_planning",
+        pluginVersion: "1.0.0",
+        schemaVersion: "1",
+        stateVersion: "3",
+        observedAt: "2026-08-21T00:00:00.000Z",
+        cards: [],
+      })
+      .mockResolvedValueOnce({
+        viewKey: "test_planning",
+        pluginVersion: "1.0.0",
+        schemaVersion: "1",
+        stateVersion: "4",
+        observedAt: "2026-08-21T00:01:00.000Z",
+        cards: [],
+      });
+
+    await expect(toolset.readSnapshot("test_planning")).resolves.toMatchObject({
+      stateVersion: "3",
+    });
+    await expect(toolset.refreshSnapshot("test_planning")).resolves.toMatchObject({
+      stateVersion: "4",
+    });
+    expect(readPort.query).toHaveBeenCalledTimes(2);
+  });
+
+  it("publishes runViewCommand as one provider-compatible object envelope", () => {
+    const { toolset } = fixture();
+    const inputSchema = toolset.tools.runViewCommand.inputSchema as unknown as {
+      jsonSchema: Record<string, unknown>;
+    };
+
+    expect(inputSchema.jsonSchema).toMatchObject({
+      type: "object",
+      properties: {
+        viewKey: { type: "string" },
+        commandKey: { type: "string" },
+        input: { type: "object", additionalProperties: true },
+        commands: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              commandKey: { type: "string" },
+              input: { type: "object", additionalProperties: true },
+            },
+          },
+        },
+      },
+    });
+    expect(inputSchema.jsonSchema).not.toHaveProperty("anyOf");
+    expect(inputSchema.jsonSchema).not.toHaveProperty("oneOf");
+  });
+
   it("reports an exact Object with no linked Cards without inventing a fallback", async () => {
     const { readPort, toolset } = fixture();
 

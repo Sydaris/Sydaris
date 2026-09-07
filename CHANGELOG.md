@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Tool and interaction reliability
+
+- Enforce portable object-envelope tool schemas and Skill action activation gates.
+- Expose generic View operations, evidence-backed change reactions, retry controls,
+  and conversation notices through the Runtime and SDK.
+- Separate answer completion from persistence, preserve conversation sessions across
+  navigation, and use server-owned message positions for concurrent chat writes.
+- Refresh explicitly requested View snapshots instead of returning stale state.
+
+Ported through downstream `1619afa`. This batch adds two migrations: evidence
+fields on View reactions, and a unique per-conversation message position with a
+server sequence. The sequence migration repairs legacy duplicate positions while
+preserving message content; back up the database and run `pnpm prisma:deploy`
+before starting the new application.
+
 ### Recoverable compilation and memory continuity
 
 - Recover interrupted Library compilation and rebuild Assertion indexes after
